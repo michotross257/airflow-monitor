@@ -208,7 +208,8 @@ default_args = {
 dag = DAG(
     dag_id=SELF_DAG_ID,
     default_args=default_args,
-    schedule_interval='@hourly'
+    schedule_interval='@hourly',
+    catchup=False
 )
 
 # ================ task definitions ================

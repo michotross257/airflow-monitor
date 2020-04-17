@@ -130,7 +130,8 @@ default_args = {
 dag = DAG(
     dag_id='condition_table_dag',
     default_args=default_args,
-    schedule_interval='@daily'
+    schedule_interval='@daily',
+    catchup=False
 )
 
 # ================ task definitions ================
