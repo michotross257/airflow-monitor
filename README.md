@@ -66,12 +66,10 @@ $ docker exec -it fe1e9af0bb9f sh
 # psql -U airflow
 ```
 
-4. Update button status of a given DAG
-
-> NOTE: button status value must one of the following: 'on', 'off'
+4. Update expected button status of a given DAG
 
 ```
-airflow=# update dag_condition set on_off_button_status = <new_button_status> where dag_id = <dag_id>;
+airflow=# update dag_condition set is_paused__expected = not is_paused__expected where dag_id = <dag_id>;
 ```
 
 5. Exit Postgres shell
