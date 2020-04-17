@@ -9,7 +9,7 @@ import pandas as pd
 
 
 """
-For a given DAG, the time threshold is equal to:
+For a given DAG, the runtime threshold is equal to:
 mean of runtimes + (standard deviation of runtimes * NUM_ST_DEVS)
 NOTE: we only care about an upper time threshold
 """
@@ -20,25 +20,33 @@ sql_statements = {
     'create': \
         '''
         CREATE TABLE IF NOT EXISTS dag_condition (
-            dag_id text PRIMARY KEY,
-            time_threshold_in_seconds int NOT NULL,
-            on_off_button_status text NOT NULL
+            dag_id TEXT PRIMARY KEY,
+            runtime_threshold_in_seconds INT NOT NULL DEFAULT 86400,
+            is_paused__expected BOOL NOT NULL DEFAULT FALSE
         );
         ''',
     'select': \
         '''
-        SELECT dag_run.dag_id, start_date, end_date, state, is_paused
-        FROM dag_run
-        LEFT JOIN dag ON dag_run.dag_id = dag.dag_id
+        SELECT
+            dr.dag_id,
+            start_date,
+            end_date,
+            coalesce(dc.is_paused__expected, d.is_paused) as is_paused
+        FROM dag_run dr
+        LEFT JOIN dag d
+            ON dr.dag_id = d.dag_id
+        LEFT JOIN dag_condition dc
+            ON dr.dag_id = dc.dag_id
         WHERE start_date IS NOT NULL
-        AND end_date IS NOT NULL;
+        AND end_date IS NOT NULL
+        AND is_active;
         '''
 }
 
 
 def analyze_data(num_st_devs, **context):
     """
-    Determine the time thresholds for the DAGs based on historical runtime data.
+    Determine the runtime thresholds for the DAGs based on historical runtime data.
 
     Args:
         num_st_devs (int): the number of standard deviations to use to determine the
@@ -51,7 +59,7 @@ def analyze_data(num_st_devs, **context):
     query_result = context['ti'].xcom_pull(task_ids='get_runtime_data')
     dag_conditions = {}
     if len(query_result):
-        df = pd.DataFrame(query_result, columns=['dag_id', 'start_date', 'end_date', 'state', 'is_paused'])
+        df = pd.DataFrame(query_result, columns=['dag_id', 'start_date', 'end_date', 'is_paused'])
         # create elapsed time column
         df['elapsed_time_in_seconds'] = df.end_date - df.start_date
         df['elapsed_time_in_seconds'] = df['elapsed_time_in_seconds'].apply(lambda x: x.total_seconds())
@@ -65,33 +73,24 @@ def analyze_data(num_st_devs, **context):
         elapsed_mean = df.groupby(['dag_id']).elapsed_time_in_seconds.mean()
         elapsed_std = df.groupby(['dag_id']).elapsed_time_in_seconds.std()
         button_statuses = df.groupby('dag_id').is_paused.max()
-        # convert is_paused to button_status
-        is_paused_to_button_status = {False: 'on', True: 'off'}
         button_statuses.name = 'button_status'
-        button_statuses = button_statuses.apply(lambda x: is_paused_to_button_status[x])
         results = pd.concat([elapsed_mean, elapsed_std], axis=1, keys=['elapsed_mean', 'elapsed_std'])
-        results['time_threshold'] = results['elapsed_mean'] + num_st_devs * results['elapsed_std']
+        results['runtime_threshold'] = results['elapsed_mean'] + num_st_devs * results['elapsed_std']
         # fill in NaN values resulting from std given only one occurrence of a dag_id
         results.fillna(method='pad', axis=1, inplace=True)
-        results = pd.concat([results, button_statuses], axis=1)
-        for dag_id in results.index:
-            dag_conditions[dag_id] = {
-                'time_threshold_in_seconds': int(results.loc[dag_id, 'time_threshold']),
-                'on_off_button_status': results.loc[dag_id, 'button_status']
-            }
+        dag_conditions = pd.concat([results, button_statuses], axis=1)
+        dag_conditions = dag_conditions.astype({'runtime_threshold': int})
+        dag_conditions = dag_conditions.rename(columns={
+            'runtime_threshold': 'runtime_threshold_in_seconds',
+            'button_status': 'is_paused__expected'
+        })[['runtime_threshold_in_seconds', 'is_paused__expected']].to_dict()
 
     return dag_conditions
 
 
-def upsert_dag_conditions(hook, **context):
+def truncate_and_insert_dag_condition(hook, **context):
     """
-    Insert or update into table the values that were returned after
-    querying and extracting data.
-
-    NOTE: updating the table with the current on/off button status doesn't make sense
-    because then the monitor will see this value as the expected value and will
-    compare it to the current value, which will always be the same. So if we want
-    to update the button/status, then we should do a manual update of the table.
+    Truncate then bulk insert the data to the dag_condition table.
 
     Args:
         hook (PostgresHook): the hook to use to run upsert statement
@@ -102,19 +101,19 @@ def upsert_dag_conditions(hook, **context):
     """
     data = context['ti'].xcom_pull(task_ids='analyze_runtime_data')
     if len(data):
-        query = ''
-        for cnt, dag_id in enumerate(data, start=1):
-            comma = ',' if cnt < len(data) else ''
-            space = ' ' if cnt < len(data) else ''
-            record = (dag_id, data[dag_id]['time_threshold_in_seconds'], data[dag_id]['on_off_button_status'])
-            if cnt == 1:
-                query += "INSERT INTO dag_condition (dag_id, time_threshold_in_seconds, on_off_button_status)"
-                query += "\nVALUES {}{}{}".format(record, comma, space)
-            else:
-                query += "{}{}{}".format(record, comma, space)
-        query += "\nON CONFLICT (dag_id) DO UPDATE"
-        query += "\nSET time_threshold_in_seconds = EXCLUDED.time_threshold_in_seconds;"
-        hook.run(query)
+        print('Truncating dag_condition table...')
+        hook.run('truncate dag_condition;')
+        print('Done - dag_condition table truncated.')
+        dag_conditions = pd.DataFrame(data)
+        print('Inserting data into dag_condition table...')
+        dag_conditions.to_sql(
+            name='dag_condition',
+            con=hook.get_sqlalchemy_engine(),
+            if_exists='append',
+            index_label='dag_id',
+            method='multi'
+        )
+        print('Done - data inserted into dag_condition table.')
 
 
 # ================ DAG definition ================
@@ -161,9 +160,9 @@ analyze_runtime_data_task = PythonOperator(
     dag=dag
 )
 
-upsert_dag_conditions_task = PythonOperator(
-    task_id='upsert_dag_conditions',
-    python_callable=upsert_dag_conditions,
+truncate_and_insert_dag_condition_task = PythonOperator(
+    task_id='truncate_and_insert_dag_condition',
+    python_callable=truncate_and_insert_dag_condition,
     op_kwargs={
         'hook': airflow_db_hook
     },
@@ -173,4 +172,4 @@ upsert_dag_conditions_task = PythonOperator(
 
 # ================ set up dependencies ================
 start_task >> create_dag_condition_table_task >> get_runtime_data_task >> \
-analyze_runtime_data_task >> upsert_dag_conditions_task >> end_task
+analyze_runtime_data_task >> truncate_and_insert_dag_condition_task >> end_task
