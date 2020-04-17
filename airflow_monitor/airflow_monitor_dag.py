@@ -11,7 +11,7 @@ from airflow.operators.python_operator import PythonOperator
 from airflow.operators.slack_operator import SlackAPIPostOperator
 
 
-SELF_DAG_ID = 'airflow_monitor'  # ID of this dag
+SELF_DAG_ID = 'airflow_monitor_dag'  # ID of this dag
 POSTGRES_CONN_ID = 'airflow_postgres'
 airflow_db_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
 slack_alert = SlackAPIPostOperator(
@@ -142,9 +142,8 @@ def get_dag_conditions_data(hook, query, **context):
 def check_button_statuses(slack_alert, **context):
     """
     Check the button status of the DAG and determine if it is as expected.
-    For clarity, I convert `is_paused` to a button status:
-    If button is 'on' then the DAG is not paused, so the equivalent `is_paused` value is False
-    If button is 'off' then the DAG is paused, so the equivalent `is_paused` value is True
+    If button is 'on' then the DAG is not paused, so the equivalent `is_paused` value is False.
+    If button is 'off' then the DAG is paused, so the equivalent `is_paused` value is True.
 
     Args:
         slack_alert (SlackAPIPostOperator): Operator used to post message on Slack
@@ -158,13 +157,12 @@ def check_button_statuses(slack_alert, **context):
     is_paused_to_button_status = {False: 'on', True: 'off'}
     for record in dag_records:
         dag_id, is_paused = record
-        current_button_status = is_paused_to_button_status[is_paused]
-        if dag_conditions.get(dag_id) and current_button_status != dag_conditions.get(dag_id):
+        if dag_conditions.get(dag_id) and is_paused != dag_conditions.get(dag_id):
             msg = '''
             :radio_button: DAG on/off button needs to be toggled.
             *Dag*: {}
             *Current Button Status*: {}
-            '''.format(dag_id, current_button_status)
+            '''.format(dag_id, is_paused_to_button_status[is_paused])
             send_slack_alert(slack_alert, msg)
 
 
@@ -184,14 +182,15 @@ def check_runtimes(slack_alert, **context):
     for record in dag_records:
         dag_id, start_date = record
         time_diff = (datetime.now(tz=timezone.utc) - start_date).total_seconds()
-        if dag_conditions.get(dag_id) and time_diff > dag_conditions.get(dag_id):
+        runtime_threshold = dag_conditions.get(dag_id)
+        if runtime_threshold and time_diff > runtime_threshold:
             msg = '''
             :spinner: DAG is running longer than expected.
             *Dag*: {}
             *Start Date*: {}
-            *Time Running*: ~{:,.2f} seconds
-            *Runtime Threshold*: {:,.2f} seconds
-            '''.format(dag_id, start_date, time_diff, time_threshold)
+            *Time Running*: ~{:,} seconds
+            *Runtime Threshold*: {:,} seconds
+            '''.format(dag_id, start_date, time_diff, runtime_threshold)
             send_slack_alert(slack_alert, msg)
 
 
