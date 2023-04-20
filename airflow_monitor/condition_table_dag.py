@@ -50,11 +50,9 @@ def analyze_data(num_st_devs, **context):
 
     Args:
         num_st_devs (int): the number of standard deviations to use to determine the
-                           upper runtime threshold for a DAG
-        **context (dict): dictionary providing the context of the task execution
-
+            upper runtime threshold for a DAG
     Returns:
-        dict: Expected conditions for each dag_id.
+        dict: Expected conditions for each dag_id
     """
     query_result = context['ti'].xcom_pull(task_ids='get_runtime_data')
     dag_conditions = {}
@@ -94,10 +92,6 @@ def truncate_and_insert_dag_condition(hook, **context):
 
     Args:
         hook (PostgresHook): the hook to use to run upsert statement
-        **context (dict): dictionary providing the context of the task execution
-
-    Returns:
-        None
     """
     data = context['ti'].xcom_pull(task_ids='analyze_runtime_data')
     if len(data):
