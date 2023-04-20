@@ -111,19 +111,15 @@ def truncate_and_insert_dag_condition(hook, **context):
 
 
 # ================ DAG definition ================
-default_args = {
-    'owner': 'airflow',
-    'description': "Create and update dag_condition table.",
-    'start_date': datetime(year=2020, month=4, day=14),
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 3,
-    'retry_delay': timedelta(minutes=5)
-}
-
 dag = DAG(
     dag_id='condition_table_dag',
-    default_args=default_args,
+    description='Create and update dag_condition table',
+    start_date=datetime(year=2020, month=4, day=14),
+    default_args={
+        'owner': 'airflow',
+        'retries': 3,
+        'retry_delay': timedelta(minutes=5)
+    },
     schedule_interval='@daily',
     catchup=False
 )
